@@ -1,0 +1,694 @@
+<?php
+/**
+ * Admin Page class.
+ *
+ * Handles the admin interface for the Plugin Performance Doctor.
+ *
+ * @package PluginPerformanceDoctor
+ */
+
+// If this file is called directly, abort.
+if ( ! defined( 'WPINC' ) ) {
+	die;
+}
+
+/**
+ * Admin Page class.
+ */
+class PPD_Admin_Page {
+
+	/**
+	 * Performance analyzer instance.
+	 *
+	 * @var PPD_Performance_Analyzer
+	 */
+	private $performance_analyzer;
+
+	/**
+	 * Conflict detector instance.
+	 *
+	 * @var PPD_Conflict_Detector
+	 */
+	private $conflict_detector;
+
+	/**
+	 * Recommendation engine instance.
+	 *
+	 * @var PPD_Recommendation_Engine
+	 */
+	private $recommendation_engine;
+
+	/**
+	 * Backup manager instance.
+	 *
+	 * @var PPD_Backup_Manager
+	 */
+	private $backup_manager;
+
+	/**
+	 * Performance scorer instance.
+	 *
+	 * @var PPD_Performance_Scorer
+	 */
+	private $performance_scorer;
+
+	/**
+	 * Optimization engine instance.
+	 *
+	 * @var PPD_Optimization_Engine
+	 */
+	private $optimization_engine;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param PPD_Performance_Analyzer  $performance_analyzer Performance analyzer instance.
+	 * @param PPD_Conflict_Detector     $conflict_detector Conflict detector instance.
+	 * @param PPD_Recommendation_Engine $recommendation_engine Recommendation engine instance.
+	 * @param PPD_Backup_Manager        $backup_manager Backup manager instance.
+	 * @param PPD_Performance_Scorer    $performance_scorer Performance scorer instance.
+	 * @param PPD_Optimization_Engine   $optimization_engine Optimization engine instance.
+	 */
+	public function __construct( $performance_analyzer, $conflict_detector, $recommendation_engine, $backup_manager = null, $performance_scorer = null, $optimization_engine = null ) {
+		$this->performance_analyzer  = $performance_analyzer;
+		$this->conflict_detector     = $conflict_detector;
+		$this->recommendation_engine = $recommendation_engine;
+		$this->backup_manager         = $backup_manager;
+		$this->performance_scorer     = $performance_scorer;
+		$this->optimization_engine    = $optimization_engine;
+	}
+
+	/**
+	 * Register admin menu.
+	 */
+	public function register_menu() {
+		add_management_page(
+			__( 'Plugin Performance Doctor', 'plugin-performance-doctor' ),
+			__( 'Performance Doctor', 'plugin-performance-doctor' ),
+			'manage_options',
+			'plugin-performance-doctor',
+			array( $this, 'render_page' )
+		);
+	}
+
+	/**
+	 * Enqueue admin assets.
+	 *
+	 * @param string $hook Current admin page hook.
+	 */
+	public function enqueue_assets( $hook ) {
+		if ( 'tools_page_plugin-performance-doctor' !== $hook ) {
+			return;
+		}
+
+		// Add inline JavaScript for AJAX functionality.
+		wp_enqueue_script( 'jquery' );
+		
+		wp_add_inline_script(
+			'jquery',
+			"
+			jQuery(document).ready(function($) {
+				var ppdAdmin = {
+					ajaxUrl: '" . esc_js( admin_url( 'admin-ajax.php' ) ) . "',
+					nonce: '" . esc_js( wp_create_nonce( 'ppd_analysis' ) ) . "',
+					strings: {
+						analyzing: '" . esc_js( __( 'Analisi in corso...', 'plugin-performance-doctor' ) ) . "',
+						error: '" . esc_js( __( 'Si è verificato un errore durante l\'analisi.', 'plugin-performance-doctor' ) ) . "'
+					}
+				};
+
+				// Run analysis button.
+				$('#ppd-run-analysis').on('click', function() {
+					var button = $(this);
+					button.prop('disabled', true);
+					$('#ppd-loading').show();
+					$('#ppd-results').hide();
+
+					$.ajax({
+						url: ppdAdmin.ajaxUrl,
+						type: 'POST',
+						data: {
+							action: 'ppd_run_analysis',
+							nonce: ppdAdmin.nonce
+						},
+						success: function(response) {
+							if (response.success) {
+								$('#ppd-results').html(response.data.html).show();
+								$('#ppd-export-results').show();
+							} else {
+								alert(response.data.message || ppdAdmin.strings.error);
+							}
+						},
+						error: function() {
+							alert(ppdAdmin.strings.error);
+						},
+						complete: function() {
+							button.prop('disabled', false);
+							$('#ppd-loading').hide();
+						}
+					});
+				});
+
+				// Export results button.
+				$('#ppd-export-results').on('click', function() {
+					var button = $(this);
+					button.prop('disabled', true);
+
+					$.ajax({
+						url: ppdAdmin.ajaxUrl,
+						type: 'POST',
+						data: {
+							action: 'ppd_export_results',
+							nonce: ppdAdmin.nonce
+						},
+						success: function(response) {
+							if (response.success) {
+								var dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(response.data, null, 2));
+								var downloadAnchorNode = document.createElement('a');
+								downloadAnchorNode.setAttribute('href', dataStr);
+								downloadAnchorNode.setAttribute('download', 'plugin-performance-analysis.json');
+								document.body.appendChild(downloadAnchorNode);
+								downloadAnchorNode.click();
+								downloadAnchorNode.remove();
+							} else {
+								alert(response.data.message || ppdAdmin.strings.error);
+							}
+						},
+						error: function() {
+							alert(ppdAdmin.strings.error);
+						},
+						complete: function() {
+							button.prop('disabled', false);
+						}
+					});
+				});
+
+				// Apply optimization button (delegated event).
+				$(document).on('click', '.ppd-apply-opt', function() {
+					var button = $(this);
+					var optId = button.data('opt-id');
+					
+					if (!confirm(ppdAdmin.strings.confirmApply || 'Applicare questa ottimizzazione?')) {
+						return;
+					}
+					
+					button.prop('disabled', true).text('Applicando...');
+					
+					$.ajax({
+						url: ppdAdmin.ajaxUrl,
+						type: 'POST',
+						data: {
+							action: 'ppd_apply_optimization',
+							nonce: ppdAdmin.nonce,
+							optimization_id: optId
+						},
+						success: function(response) {
+							if (response.success) {
+								alert(response.data.message || 'Ottimizzazione applicata con successo!');
+								// Reload analysis to show updated state.
+								$('#ppd-run-analysis').click();
+							} else {
+								alert(response.data.message || ppdAdmin.strings.error);
+								button.prop('disabled', false).text('Applica');
+							}
+						},
+						error: function() {
+							alert(ppdAdmin.strings.error);
+							button.prop('disabled', false).text('Applica');
+						}
+					});
+				});
+
+				// Revert optimization button (delegated event).
+				$(document).on('click', '.ppd-revert-opt', function() {
+					var button = $(this);
+					var optId = button.data('opt-id');
+					
+					if (!confirm(ppdAdmin.strings.confirmRevert || 'Annullare questa ottimizzazione?')) {
+						return;
+					}
+					
+					button.prop('disabled', true).text('Annullando...');
+					
+					$.ajax({
+						url: ppdAdmin.ajaxUrl,
+						type: 'POST',
+						data: {
+							action: 'ppd_revert_optimization',
+							nonce: ppdAdmin.nonce,
+							optimization_id: optId
+						},
+						success: function(response) {
+							if (response.success) {
+								alert(response.data.message || 'Ottimizzazione annullata con successo!');
+								// Reload analysis to show updated state.
+								$('#ppd-run-analysis').click();
+							} else {
+								alert(response.data.message || ppdAdmin.strings.error);
+								button.prop('disabled', false).text('Annulla');
+							}
+						},
+						error: function() {
+							alert(ppdAdmin.strings.error);
+							button.prop('disabled', false).text('Annulla');
+						}
+					});
+				});
+			});
+			"
+		);
+	}
+
+	/**
+	 * Render admin page.
+	 */
+	public function render_page() {
+		?>
+		<div class="wrap">
+			<h1><?php echo esc_html__( 'Plugin Performance Doctor', 'plugin-performance-doctor' ); ?></h1>
+			<p><?php echo esc_html__( 'Analizza le prestazioni e i conflitti dei plugin attivi sul tuo sito WordPress.', 'plugin-performance-doctor' ); ?></p>
+
+			<div class="ppd-actions">
+				<button type="button" id="ppd-run-analysis" class="button button-primary">
+					<?php echo esc_html__( 'Avvia Analisi', 'plugin-performance-doctor' ); ?>
+				</button>
+				<button type="button" id="ppd-export-results" class="button" style="display:none;">
+					<?php echo esc_html__( 'Esporta Risultati', 'plugin-performance-doctor' ); ?>
+				</button>
+			</div>
+
+			<div id="ppd-loading" style="display:none; padding: 20px; background: #fff; border: 1px solid #ccd0d4; margin-top: 20px;">
+				<p><span class="spinner is-active" style="float:none; margin: 0 10px 0 0;"></span><?php echo esc_html__( 'Analisi in corso, attendere...', 'plugin-performance-doctor' ); ?></p>
+			</div>
+
+			<div id="ppd-results" style="display:none;">
+				<!-- Results will be loaded here via AJAX -->
+			</div>
+		</div>
+		<?php
+	}
+
+	/**
+	 * AJAX handler for running analysis.
+	 */
+	public function ajax_run_analysis() {
+		check_ajax_referer( 'ppd_analysis', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permessi insufficienti.', 'plugin-performance-doctor' ) ) );
+		}
+
+		// Run analysis.
+		$performance_metrics = $this->performance_analyzer->analyze();
+		$conflicts           = $this->conflict_detector->detect_conflicts();
+		$recommendations     = $this->recommendation_engine->generate_recommendations( $performance_metrics, $conflicts );
+
+		// Calculate performance score.
+		$score_data = null;
+		if ( $this->performance_scorer ) {
+			$score_data = $this->performance_scorer->calculate_score( $performance_metrics, $conflicts );
+			$this->performance_scorer->save_to_history( $score_data );
+		}
+
+		// Get available optimizations.
+		$optimizations = array();
+		if ( $this->optimization_engine ) {
+			$optimizations = $this->optimization_engine->get_available_optimizations();
+			$active_opts   = $this->optimization_engine->get_active_optimizations();
+		}
+
+		// Prepare response.
+		$response = array(
+			'html' => $this->render_results_html( $performance_metrics, $conflicts, $recommendations, $score_data, $optimizations ),
+		);
+
+		wp_send_json_success( $response );
+	}
+
+	/**
+	 * AJAX handler for exporting results.
+	 */
+	public function ajax_export_results() {
+		check_ajax_referer( 'ppd_analysis', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permessi insufficienti.', 'plugin-performance-doctor' ) ) );
+		}
+
+		// Run analysis.
+		$performance_metrics = $this->performance_analyzer->analyze();
+		$conflicts           = $this->conflict_detector->detect_conflicts();
+		$recommendations     = $this->recommendation_engine->generate_recommendations( $performance_metrics, $conflicts );
+
+		// Prepare export data.
+		$export_data = array(
+			'timestamp'     => current_time( 'mysql' ),
+			'site_url'      => get_site_url(),
+			'wp_version'    => get_bloginfo( 'version' ),
+			'php_version'   => PHP_VERSION,
+			'performance'   => $performance_metrics,
+			'conflicts'     => $conflicts,
+			'recommendations' => $recommendations,
+		);
+
+		wp_send_json_success( $export_data );
+	}
+
+	/**
+	 * AJAX handler for applying optimization.
+	 */
+	public function ajax_apply_optimization() {
+		check_ajax_referer( 'ppd_analysis', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permessi insufficienti.', 'plugin-performance-doctor' ) ) );
+		}
+
+		$optimization_id = isset( $_POST['optimization_id'] ) ? sanitize_text_field( $_POST['optimization_id'] ) : '';
+
+		if ( empty( $optimization_id ) || ! $this->optimization_engine ) {
+			wp_send_json_error( array( 'message' => __( 'ID ottimizzazione non valido.', 'plugin-performance-doctor' ) ) );
+		}
+
+		// Apply optimization.
+		$result = $this->optimization_engine->apply_optimization( $optimization_id );
+
+		if ( $result['success'] ) {
+			wp_send_json_success( array(
+				'message' => $result['message'],
+				'optimization_id' => $optimization_id,
+			) );
+		} else {
+			wp_send_json_error( array( 'message' => $result['message'] ) );
+		}
+	}
+
+	/**
+	 * AJAX handler for reverting optimization.
+	 */
+	public function ajax_revert_optimization() {
+		check_ajax_referer( 'ppd_analysis', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permessi insufficienti.', 'plugin-performance-doctor' ) ) );
+		}
+
+		$optimization_id = isset( $_POST['optimization_id'] ) ? sanitize_text_field( $_POST['optimization_id'] ) : '';
+
+		if ( empty( $optimization_id ) || ! $this->optimization_engine ) {
+			wp_send_json_error( array( 'message' => __( 'ID ottimizzazione non valido.', 'plugin-performance-doctor' ) ) );
+		}
+
+		// Revert optimization.
+		$result = $this->optimization_engine->revert_optimization( $optimization_id );
+
+		if ( $result['success'] ) {
+			wp_send_json_success( array(
+				'message' => $result['message'],
+				'optimization_id' => $optimization_id,
+			) );
+		} else {
+			wp_send_json_error( array( 'message' => $result['message'] ) );
+		}
+	}
+
+	/**
+	 * AJAX handler for rollback change.
+	 */
+	public function ajax_rollback_change() {
+		check_ajax_referer( 'ppd_analysis', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permessi insufficienti.', 'plugin-performance-doctor' ) ) );
+		}
+
+		$backup_id = isset( $_POST['backup_id'] ) ? sanitize_text_field( $_POST['backup_id'] ) : '';
+
+		if ( empty( $backup_id ) || ! $this->backup_manager ) {
+			wp_send_json_error( array( 'message' => __( 'ID backup non valido.', 'plugin-performance-doctor' ) ) );
+		}
+
+		// Rollback.
+		$success = $this->backup_manager->rollback( $backup_id );
+
+		if ( $success ) {
+			wp_send_json_success( array(
+				'message' => __( 'Modifica annullata con successo.', 'plugin-performance-doctor' ),
+				'backup_id' => $backup_id,
+			) );
+		} else {
+			wp_send_json_error( array( 'message' => __( 'Errore durante l\'annullamento della modifica.', 'plugin-performance-doctor' ) ) );
+		}
+	}
+
+	/**
+	 * Render results HTML.
+	 *
+	 * @param array $performance_metrics Performance metrics.
+	 * @param array $conflicts Conflicts.
+	 * @param array $recommendations Recommendations.
+	 * @param array $score_data Performance score data.
+	 * @param array $optimizations Available optimizations.
+	 * @return string HTML output.
+	 */
+	private function render_results_html( $performance_metrics, $conflicts, $recommendations, $score_data = null, $optimizations = array() ) {
+		ob_start();
+		?>
+		<div class="ppd-results-container">
+			<!-- Performance Score -->
+			<?php if ( $score_data ) : ?>
+				<div class="ppd-score-section">
+					<h2><?php echo esc_html__( 'Score Prestazioni', 'plugin-performance-doctor' ); ?></h2>
+					<div class="ppd-score-display">
+						<div class="ppd-score-circle ppd-grade-<?php echo esc_attr( strtolower( $score_data['grade'] ) ); ?>">
+							<div class="ppd-score-value"><?php echo esc_html( $score_data['overall_score'] ); ?></div>
+							<div class="ppd-score-grade"><?php echo esc_html( $score_data['grade'] ); ?></div>
+						</div>
+						<div class="ppd-score-metrics">
+							<?php foreach ( $score_data['metrics'] as $metric ) : ?>
+								<div class="ppd-metric">
+									<div class="ppd-metric-label"><?php echo esc_html( $metric['label'] ); ?></div>
+									<div class="ppd-metric-bar">
+										<div class="ppd-metric-fill" style="width: <?php echo esc_attr( $metric['score'] ); ?>%;"></div>
+									</div>
+									<div class="ppd-metric-value"><?php echo esc_html( $metric['value'] ); ?></div>
+								</div>
+							<?php endforeach; ?>
+						</div>
+					</div>
+				</div>
+			<?php endif; ?>
+
+			<!-- Optimizations -->
+			<?php if ( ! empty( $optimizations ) && $this->optimization_engine ) : ?>
+				<div class="ppd-optimizations-section">
+					<h2><?php echo esc_html__( 'Ottimizzazioni Disponibili', 'plugin-performance-doctor' ); ?></h2>
+					<div class="ppd-optimizations-grid">
+						<?php
+						$active_opts = $this->optimization_engine->get_active_optimizations();
+						foreach ( $optimizations as $opt_id => $opt ) :
+							$is_active = isset( $active_opts[ $opt_id ] );
+							$impact_class = 'ppd-impact-' . $opt['impact'];
+							?>
+							<div class="ppd-optimization-card <?php echo $is_active ? 'ppd-opt-active' : ''; ?>">
+								<div class="ppd-opt-header">
+									<h4><?php echo esc_html( $opt['name'] ); ?></h4>
+									<span class="ppd-opt-impact <?php echo esc_attr( $impact_class ); ?>">
+										<?php
+										$impact_labels = array(
+											'high'   => __( 'Alto Impatto', 'plugin-performance-doctor' ),
+											'medium' => __( 'Medio Impatto', 'plugin-performance-doctor' ),
+											'low'    => __( 'Basso Impatto', 'plugin-performance-doctor' ),
+										);
+										echo esc_html( $impact_labels[ $opt['impact'] ] ?? '' );
+										?>
+									</span>
+								</div>
+								<p class="ppd-opt-description"><?php echo esc_html( $opt['description'] ); ?></p>
+								<div class="ppd-opt-actions">
+									<?php if ( $is_active ) : ?>
+										<button type="button" class="button ppd-revert-opt" data-opt-id="<?php echo esc_attr( $opt_id ); ?>">
+											<?php echo esc_html__( 'Annulla', 'plugin-performance-doctor' ); ?>
+										</button>
+										<span class="ppd-opt-status"><?php echo esc_html__( '✓ Attiva', 'plugin-performance-doctor' ); ?></span>
+									<?php else : ?>
+										<button type="button" class="button button-primary ppd-apply-opt" data-opt-id="<?php echo esc_attr( $opt_id ); ?>">
+											<?php echo esc_html__( 'Applica', 'plugin-performance-doctor' ); ?>
+										</button>
+									<?php endif; ?>
+								</div>
+							</div>
+						<?php endforeach; ?>
+					</div>
+				</div>
+			<?php endif; ?>
+			<!-- Summary -->
+			<div class="ppd-summary">
+				<h2><?php echo esc_html__( 'Riepilogo Analisi', 'plugin-performance-doctor' ); ?></h2>
+				<div class="ppd-summary-stats">
+					<div class="ppd-stat">
+						<span class="ppd-stat-label"><?php echo esc_html__( 'Plugin Analizzati:', 'plugin-performance-doctor' ); ?></span>
+						<span class="ppd-stat-value"><?php echo count( $performance_metrics ); ?></span>
+					</div>
+					<div class="ppd-stat">
+						<span class="ppd-stat-label"><?php echo esc_html__( 'Conflitti Rilevati:', 'plugin-performance-doctor' ); ?></span>
+						<span class="ppd-stat-value"><?php echo count( $conflicts ); ?></span>
+					</div>
+					<div class="ppd-stat">
+						<span class="ppd-stat-label"><?php echo esc_html__( 'Raccomandazioni:', 'plugin-performance-doctor' ); ?></span>
+						<span class="ppd-stat-value"><?php echo count( $recommendations ); ?></span>
+					</div>
+				</div>
+			</div>
+
+			<!-- Recommendations -->
+			<?php if ( ! empty( $recommendations ) ) : ?>
+				<div class="ppd-recommendations">
+					<h2><?php echo esc_html__( 'Raccomandazioni', 'plugin-performance-doctor' ); ?></h2>
+					<?php foreach ( $recommendations as $recommendation ) : ?>
+						<div class="ppd-recommendation ppd-severity-<?php echo esc_attr( $recommendation['severity'] ); ?>">
+							<h3><?php echo esc_html( $recommendation['title'] ); ?></h3>
+							<p class="ppd-recommendation-description"><?php echo esc_html( $recommendation['description'] ); ?></p>
+							<?php if ( ! empty( $recommendation['actions'] ) ) : ?>
+								<div class="ppd-recommendation-actions">
+									<strong><?php echo esc_html__( 'Azioni Consigliate:', 'plugin-performance-doctor' ); ?></strong>
+									<ul>
+										<?php foreach ( $recommendation['actions'] as $action ) : ?>
+											<li><?php echo esc_html( $action ); ?></li>
+										<?php endforeach; ?>
+									</ul>
+								</div>
+							<?php endif; ?>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			<?php endif; ?>
+
+			<!-- Performance Metrics -->
+			<div class="ppd-performance-metrics">
+				<h2><?php echo esc_html__( 'Metriche di Prestazioni', 'plugin-performance-doctor' ); ?></h2>
+				<table class="wp-list-table widefat fixed striped">
+					<thead>
+						<tr>
+							<th><?php echo esc_html__( 'Plugin', 'plugin-performance-doctor' ); ?></th>
+							<th><?php echo esc_html__( 'Livello di Carico', 'plugin-performance-doctor' ); ?></th>
+							<th><?php echo esc_html__( 'Tempo di Esecuzione', 'plugin-performance-doctor' ); ?></th>
+							<th><?php echo esc_html__( 'Query DB', 'plugin-performance-doctor' ); ?></th>
+							<th><?php echo esc_html__( 'Uso Memoria', 'plugin-performance-doctor' ); ?></th>
+							<th><?php echo esc_html__( 'Hook', 'plugin-performance-doctor' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php foreach ( $performance_metrics as $plugin_slug => $metrics ) : ?>
+							<tr>
+								<td><strong><?php echo esc_html( $metrics['name'] ); ?></strong></td>
+								<td>
+									<span class="ppd-load-level ppd-load-<?php echo esc_attr( $metrics['load_level'] ?? 'low' ); ?>">
+										<?php
+										$load_labels = array(
+											'high'   => __( 'Alto', 'plugin-performance-doctor' ),
+											'medium' => __( 'Medio', 'plugin-performance-doctor' ),
+											'low'    => __( 'Basso', 'plugin-performance-doctor' ),
+										);
+										echo esc_html( $load_labels[ $metrics['load_level'] ?? 'low' ] ?? '-' );
+										?>
+									</span>
+								</td>
+								<td><?php echo esc_html( number_format( $metrics['execution_time'] * 1000, 2 ) ); ?> ms</td>
+								<td><?php echo esc_html( $metrics['db_queries'] ); ?></td>
+								<td><?php echo esc_html( size_format( $metrics['memory_usage'], 2 ) ); ?></td>
+								<td><?php echo esc_html( $metrics['hook_count'] ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			</div>
+
+			<!-- Conflicts -->
+			<?php if ( ! empty( $conflicts ) ) : ?>
+				<div class="ppd-conflicts">
+					<h2><?php echo esc_html__( 'Conflitti Rilevati', 'plugin-performance-doctor' ); ?></h2>
+					<?php
+					// Group conflicts by type.
+					$conflicts_by_type = array();
+					foreach ( $conflicts as $conflict ) {
+						$type = $conflict['type'];
+						if ( ! isset( $conflicts_by_type[ $type ] ) ) {
+							$conflicts_by_type[ $type ] = array();
+						}
+						$conflicts_by_type[ $type ][] = $conflict;
+					}
+
+					// Type labels in Italian.
+					$type_labels = array(
+						'hook_priority'           => __( 'Conflitti di Priorità Hook', 'plugin-performance-doctor' ),
+						'extreme_priority'        => __( 'Priorità Hook Estrema', 'plugin-performance-doctor' ),
+						'jquery_conflict'         => __( 'Conflitto jQuery', 'plugin-performance-doctor' ),
+						'duplicate_script'        => __( 'Script Duplicato', 'plugin-performance-doctor' ),
+			.ppd-stat-label { font-size: 14px; color: #666; }
+			.ppd-stat-value { font-size: 32px; font-weight: bold; color: #2271b1; }
+			.ppd-recommendations, .ppd-performance-metrics, .ppd-conflicts { background: #fff; padding: 20px; margin-bottom: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04); }
+			.ppd-recommendation, .ppd-conflict { padding: 15px; margin-bottom: 15px; border-left: 4px solid #ccc; background: #f9f9f9; }
+			.ppd-severity-high { border-left-color: #dc3232; }
+			.ppd-severity-medium { border-left-color: #f0b849; }
+			.ppd-severity-low { border-left-color: #46b450; }
+			.ppd-recommendation h3 { margin-top: 0; }
+			.ppd-recommendation-actions ul { margin: 10px 0; padding-left: 20px; }
+			.ppd-load-level { padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+			.ppd-load-high { background: #dc3232; color: #fff; }
+			.ppd-load-medium { background: #f0b849; color: #fff; }
+			.ppd-load-low { background: #46b450; color: #fff; }
+			.ppd-actions { margin: 20px 0; }
+			#ppd-loading { padding: 20px; background: #fff; border: 1px solid #ccd0d4; margin-top: 20px; }
+			
+			/* Conflict-specific styles */
+			.ppd-conflict-group { margin-bottom: 25px; }
+			.ppd-conflict-type-title { margin: 0 0 15px 0; padding: 10px 15px; background: #f0f0f1; border-left: 4px solid #2271b1; font-size: 16px; }
+			.ppd-conflict-count { color: #666; font-size: 14px; font-weight: normal; }
+			.ppd-conflict-description { margin: 0 0 10px 0; font-weight: 500; }
+			.ppd-conflict-plugins { margin-top: 10px; padding-top: 10px; border-top: 1px solid #ddd; }
+			.ppd-plugin-list { margin: 5px 0 0 0; padding-left: 20px; list-style: disc; }
+			.ppd-plugin-list li { margin-bottom: 8px; }
+			.ppd-file-path { background: #f0f0f1; padding: 2px 6px; border-radius: 3px; font-size: 12px; color: #50575e; display: inline-block; margin-top: 3px; }
+			.ppd-conflict-details { margin-top: 10px; }
+			.ppd-conflict-details summary { cursor: pointer; color: #2271b1; font-size: 13px; }
+			.ppd-conflict-details pre { background: #f6f7f7; padding: 10px; border-radius: 3px; font-size: 12px; overflow-x: auto; margin: 10px 0 0 0; }
+			
+			/* Performance Score styles */
+			.ppd-score-section { background: #fff; padding: 20px; margin-bottom: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04); }
+			.ppd-score-display { display: flex; gap: 40px; align-items: center; }
+			.ppd-score-circle { width: 150px; height: 150px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 8px solid #ddd; position: relative; }
+			.ppd-score-circle.ppd-grade-a { border-color: #46b450; background: linear-gradient(135deg, #f0f9f1 0%, #e7f5e8 100%); }
+			.ppd-score-circle.ppd-grade-b { border-color: #00a0d2; background: linear-gradient(135deg, #e5f5fa 0%, #d9eff5 100%); }
+			.ppd-score-circle.ppd-grade-c { border-color: #f0b849; background: linear-gradient(135deg, #fef8e7 0%, #fdf3d9 100%); }
+			.ppd-score-circle.ppd-grade-d { border-color: #f56e28; background: linear-gradient(135deg, #fef0e7 0%, #fde8d9 100%); }
+			.ppd-score-circle.ppd-grade-f { border-color: #dc3232; background: linear-gradient(135deg, #fce8e8 0%, #fad9d9 100%); }
+			.ppd-score-value { font-size: 48px; font-weight: bold; line-height: 1; }
+			.ppd-score-grade { font-size: 24px; font-weight: 600; color: #666; }
+			.ppd-score-metrics { flex: 1; }
+			.ppd-metric { margin-bottom: 15px; }
+			.ppd-metric-label { font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #1d2327; }
+			.ppd-metric-bar { height: 8px; background: #f0f0f1; border-radius: 4px; overflow: hidden; }
+			.ppd-metric-fill { height: 100%; background: linear-gradient(90deg, #2271b1 0%, #135e96 100%); transition: width 0.3s ease; }
+			.ppd-metric-value { font-size: 12px; color: #666; margin-top: 3px; }
+			
+			/* Optimizations styles */
+			.ppd-optimizations-section { background: #fff; padding: 20px; margin-bottom: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04); }
+			.ppd-optimizations-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; margin-top: 15px; }
+			.ppd-optimization-card { background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding: 15px; transition: all 0.2s ease; }
+			.ppd-optimization-card:hover { box-shadow: 0 2px 4px rgba(0,0,0,.1); }
+			.ppd-optimization-card.ppd-opt-active { background: #e7f5e8; border-color: #46b450; }
+			.ppd-opt-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+			.ppd-opt-header h4 { margin: 0; font-size: 15px; }
+			.ppd-opt-impact { padding: 3px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; text-transform: uppercase; }
+			.ppd-impact-high { background: #46b450; color: #fff; }
+			.ppd-impact-medium { background: #f0b849; color: #fff; }
+			.ppd-impact-low { background: #72aee6; color: #fff; }
+			.ppd-opt-description { font-size: 13px; color: #666; margin: 10px 0; line-height: 1.5; }
+			.ppd-opt-actions { display: flex; gap: 10px; align-items: center; margin-top: 15px; }
+			.ppd-opt-status { color: #46b450; font-weight: 600; font-size: 13px; }
+		</style>
+		<?php
+		return ob_get_clean();
+	}
+}
